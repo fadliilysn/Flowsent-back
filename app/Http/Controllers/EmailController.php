@@ -1,0 +1,42 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use App\Services\EmailService;
+use App\Services\MailerService;
+
+class EmailController extends Controller
+{
+    protected $emailService;
+    protected $mailerService;
+
+    public function __construct(EmailService $emailService, MailerService $mailerService)
+    {
+        $this->emailService = $emailService;
+        $this->mailerService = $mailerService;
+    }
+
+    public function inbox()
+    {
+        return response()->json($this->emailService->getInbox());
+    }
+
+    public function sent()
+    {
+        return response()->json($this->emailService->getSent());
+    }
+
+    public function send(Request $request)
+    {
+        $request->validate([
+            'to'      => 'required|email',
+            'subject' => 'required|string',
+            'body'    => 'required|string',
+        ]);
+
+        $this->mailerService->sendEmail($request->to, $request->subject, $request->body);
+
+        return response()->json(['status' => 'Email sent successfully']);
+    }
+}

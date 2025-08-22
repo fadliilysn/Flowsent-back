@@ -21,28 +21,6 @@ class EmailService
         return $messages->map(fn($msg) => $this->parseEmail($msg));
     }
 
-    public function getEmailByUid($folderName, $uid)
-    {
-        try {
-        $folder = $this->client->getFolder($folderName);
-
-        // Pastikan UID jadi integer
-        $uid = (int) $uid;
-
-        $message = $folder->messages()->getMessage($uid);
-
-        if (!$message) {
-            return null; // tidak ketemu
-        }
-
-        return $this->parseEmail($message);
-        } catch (\Exception $e) {
-            // kalau ada error dari library, misalnya UID tidak valid
-            return null;
-        }
-    }
-
-
     public function getSent()
     {
         $folder = $this->client->getFolder('Sent Items');
@@ -69,85 +47,107 @@ class EmailService
         $folder = $this->client->getFolder('Junk Mail');
         $messages = $folder->messages()->all()->limit(20)->get();
         return $messages->map(fn($msg) => $this->parseEmail($msg));
-    }   
+    }
+
+    public function getEmailByUid($folderName, $uid)
+    {
+        try {
+            $folder = $this->client->getFolder($folderName);
+
+            $uid = (int) $uid;
+
+            $message = $folder->messages()->getMessage($uid);
+
+            if (!$message) {
+                return null;
+            }
+
+            return $this->parseEmail($message);
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
 
     /**
-     * 🔑 Parsing email dengan decode header
+     * 🔑 Parsing email
      */
-    protected function parseEmail($msg)
+    private function parseEmail($message)
     {
-        // Subject decode
-        $subject = $this->decodeHeader($msg->getSubject() ?? '');
+        // Ambil tanggal
+        $dateAttr = $message->getDate()->first() ?? $message->getInternalDate()->first();
 
-        // Ambil body text (plain text lebih diprioritaskan)
-        $body = $msg->getTextBody();
+        // Flags
+        $flagsRaw = $message->getFlags()->toArray();
+        $flags = [
+            'seen'     => in_array('Seen', $flagsRaw),
+            'answered' => in_array('Answered', $flagsRaw),
+            'flagged'  => in_array('Flagged', $flagsRaw),
+        ];
 
-        // Kalau kosong coba ambil HTML body
-        if (empty($body)) {
-            $body = $msg->getHTMLBody();
-        }
-
-        // Kalau masih kosong, cek MIME parts
-        if (empty($body)) {
-            foreach ($msg->getBodies() as $part) {
-                if ($part->type == 'text' && in_array(strtolower($part->subtype), ['plain', 'html'])) {
-                    $body = $part->content;
-                    break;
-                }
+        // Recipients
+        $mapRecipients = function ($recipients) {
+            $list = [];
+            foreach ($recipients->all() as $r) {
+                $list[] = [
+                    'name'  => $r->personal ?? null,
+                    'email' => $r->mail ?? null
+                ];
             }
+            return $list;
+        };
+
+        $toList  = $mapRecipients($message->getTo());
+        $ccList  = $mapRecipients($message->getCc());
+        $bccList = $mapRecipients($message->getBcc());
+
+        // Attachments
+        $attachmentsList = [];
+        foreach ($message->getAttachments() as $attachment) {
+            $attachmentsList[] = [
+                'filename'      => $attachment->name,
+                'content_type'  => $attachment->mime,
+                'size'          => $attachment->size,
+                'download_url'  => url("/download/uid/{$message->getUid()}/" . urlencode($attachment->name)),
+            ];
         }
 
-        // 🔑 Bersihkan body:
-        if (!empty($body)) {
-            // Hapus header MIME kalau masih ikut kebawa
-            $body = preg_replace('/^(.*?\r\n\r\n)/s', '', $body);
-
-            // Kalau masih HTML → jadikan teks biasa
-            $body = strip_tags($body);
-
-            // Normalisasi whitespace
-            $body = trim(preg_replace('/\s+/', ' ', $body));
-        }
-
+        // === Bentuk JSON sesuai kebutuhan frontend ===
         return [
-            "uid"     => $msg->getUid(),
-            "subject" => $subject,
-            "from"    => $this->decodeHeader(optional($msg->getFrom())->first()?->mail ?? ''),
-            "to"      => $this->decodeHeader(optional($msg->getTo())->first()?->mail ?? ''),
-            "date"    => optional($msg->getDate())->get()->format('Y-m-d H:i:s'),
-            "body"    => $body ?? '',
-            "body_html" => $msg->getHTMLBody() ?? '',
+            'uid'           => $message->getUid(),
+            'messageId'     => (string) $message->getMessageId(),
+            'folder'        => $message->getFolderPath(),
+            'sender'        => $message->getFrom()[0]->personal ?? $message->getFrom()[0]->mail,
+            'senderEmail'   => $message->getFrom()[0]->mail ?? null,
+            'subject'       => (string) $message->getSubject(),
+            'preview'       => \Illuminate\Support\Str::limit(strip_tags($message->getTextBody() ?? $message->getHTMLBody()), 120),
+            'timestamp'     => $dateAttr ? $dateAttr->format('d F Y, H:i T') : null,
+            'seen'          => $flags['seen'],
+            'flagged'       => $flags['flagged'],
+            'answered'      => $flags['answered'],
+            'isNew'         => !$flags['seen'],
+            'attachments'   => array_map(fn($att) => $att['filename'], $attachmentsList),
+            'category'      => $message->getFolderPath(),
+            'recipients'    => $toList,
+            'cc'            => $ccList,
+            'bcc'           => $bccList,
+            'body'          => [
+                'text' => $message->getTextBody(),
+                'html' => $message->getHTMLBody(),
+            ],
+            'rawAttachments' => $attachmentsList,
         ];
     }
 
-    /**
-     * 📨 Decode subject & header agar tidak kosong {}
-     */
-    private function decodeHeader($header)
-    {
-        if (empty($header)) {
-            return '';
-        }
-
-        $decoded = imap_mime_header_decode($header);
-        $result = '';
-
-        foreach ($decoded as $part) {
-            $result .= $part->text;
-        }
-
-        return trim($result);
-    }
-
     private $folderMap = [
-    'inbox'   => 'INBOX',
-    'sent'    => 'Sent Items',
-    'draft'   => 'Drafts',
-    'deleted' => 'Deleted Items',
-    'junk'    => 'Junk Mail',
+        'inbox'   => 'INBOX',
+        'sent'    => 'Sent Items',
+        'draft'   => 'Drafts',
+        'deleted' => 'Deleted Items',
+        'junk'    => 'Junk Mail',
     ];
 
-    public function resolveFolder($key) {
+    public function resolveFolder($key)
+    {
         return $this->folderMap[strtolower($key)] ?? 'INBOX';
     }
 }

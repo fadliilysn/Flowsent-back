@@ -35,7 +35,6 @@ class AuthController extends Controller
         $payload = JWTFactory::customClaims([
             'sub'      => $email,     // subject wajib
             'email'    => $email,
-            'password' => $password,
             'iat'      => time(),
             'exp'      => time() + 3600
         ])->make();
